@@ -1,11 +1,11 @@
 
 import base64
-import json
 import re
 import streamlit as st
 import model_registry
 from datetime import datetime
-from pathlib import Path
+from crawler import crawl
+from investigation import build_investigation_record, load_investigations, save_investigation
 from scrape import scrape_multiple
 from search import get_search_results
 import config as _robin_cfg
@@ -73,43 +73,13 @@ def _render_no_results(headline: str, hints: list) -> None:
     st.stop()
 
 
-# --- Investigation persistence ---
-
-INVESTIGATIONS_DIR = Path("investigations")
-
-
-def save_investigation(query: str, refined_query: str, model: str, preset_label: str, sources: list, summary: str) -> str:
-    """Save a completed investigation to disk. Returns the filename."""
-    INVESTIGATIONS_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"investigation_{timestamp}.json"
-    data = {
-        "timestamp": datetime.now().isoformat(),
-        "query": query,
-        "refined_query": refined_query,
-        "model": model,
-        "preset": preset_label,
-        "sources": sources,
-        "summary": summary,
-    }
-    (INVESTIGATIONS_DIR / fname).write_text(json.dumps(data, indent=2))
-    return fname
-
-
-def load_investigations() -> list:
-    """Return list of saved investigations sorted newest-first."""
-    if not INVESTIGATIONS_DIR.exists():
-        return []
-    files = sorted(INVESTIGATIONS_DIR.glob("investigation_*.json"), reverse=True)
-    investigations = []
-    for f in files:
-        try:
-            data = json.loads(f.read_text())
-            data["_filename"] = f.name
-            investigations.append(data)
-        except Exception:
-            continue
-    return investigations
+# V1.3 keeps the crawler policy fixed while persistence is introduced. UI
+# controls for these values belong to a later patch.
+V1_CRAWL_CONFIG = {
+    "max_depth": 1,
+    "max_pages": 20,
+    "scope": "same_host",
+}
 
 
 # Cache expensive backend calls
@@ -122,6 +92,16 @@ def cached_search_results(refined_query: str, threads: int):
 def cached_scrape_multiple(filtered: list, threads: int, content_chars: int):
     return scrape_multiple(filtered, max_workers=threads,
                            max_return_chars=content_chars)
+
+
+@st.cache_data(ttl=200, show_spinner=False)
+def cached_crawl_pages(filtered: list):
+    return crawl(
+        filtered,
+        max_depth=V1_CRAWL_CONFIG["max_depth"],
+        max_pages=V1_CRAWL_CONFIG["max_pages"],
+        same_host=V1_CRAWL_CONFIG["scope"] == "same_host",
+    )
 
 
 # Streamlit page configuration
@@ -409,6 +389,12 @@ if saved_investigations:
                 _preset_key = _saved_preset
             else:
                 _preset_key = "threat_intel"
+            _saved_pages = _saved.get("pages", [])
+            _saved_scraped = {
+                page.get("url"): page.get("normalized_text", "")
+                for page in _saved_pages
+                if page.get("url") and page.get("crawl_depth", 0) == 0
+            }
             st.session_state["active_investigation"] = {
                 "query": _saved.get("query", ""),
                 "refined": _saved.get("refined_query", ""),
@@ -416,7 +402,9 @@ if saved_investigations:
                 "preset": _preset_key,
                 "preset_label": _saved.get("preset", ""),
                 "sources": _saved.get("sources", []),
-                "scraped": None,  # raw scrape isn't persisted to disk
+                "crawl": _saved.get("crawl", {}),
+                "pages": _saved_pages,
+                "scraped": _saved_scraped or None,
                 "summary": _saved.get("summary", ""),
                 "results_count": len(_saved.get("sources", [])),
                 "timestamp": _saved.get("timestamp", ""),
@@ -577,7 +565,7 @@ if _do_run:
     query = _active_query
     # Clear any prior investigation, chat, and pipeline state
     st.session_state.pop("active_investigation", None)
-    for k in ["refined", "results", "filtered", "scraped", "streamed_summary",
+    for k in ["refined", "results", "filtered", "pages", "scraped", "streamed_summary",
               "chat_history", "pivot_suggestions"]:
         st.session_state.pop(k, None)
 
@@ -658,15 +646,17 @@ if _do_run:
         unsafe_allow_html=True,
     )
 
-    # Stage 5 - Scrape content
+    # Stage 5 - Keep the legacy scrape path for LLM input, then collect the
+    # richer recursive page records separately for V1.3 persistence.
     with status_slot.container():
-        with st.spinner("📜 Scraping content..."):
+        with st.spinner("📜 Scraping and crawling content..."):
             try:
                 st.session_state.scraped = cached_scrape_multiple(
                     st.session_state.filtered, threads, content_chars
                 )
+                st.session_state.pages = cached_crawl_pages(st.session_state.filtered)
             except Exception as e:
-                _render_pipeline_error("scrape the selected pages", e)
+                _render_pipeline_error("scrape and crawl the selected pages", e)
 
     # Stage 6 - Summarize (streaming)
     st.session_state.streamed_summary = ""
@@ -701,14 +691,17 @@ if _do_run:
         summary_slot.markdown(summary_text)
 
     # Save investigation
-    _fname = save_investigation(
+    _investigation_record = build_investigation_record(
         query=query,
         refined_query=st.session_state.refined,
         model=model,
         preset_label=selected_preset_label,
         sources=st.session_state.filtered,
+        crawl=V1_CRAWL_CONFIG,
+        pages=st.session_state.pages,
         summary=st.session_state.streamed_summary,
     )
+    _fname = save_investigation(_investigation_record)
 
     # Render organized sections
     with notes_placeholder.container():
@@ -747,6 +740,8 @@ if _do_run:
         "preset": selected_preset,
         "preset_label": selected_preset_label,
         "sources": st.session_state.filtered,
+        "crawl": dict(V1_CRAWL_CONFIG),
+        "pages": st.session_state.pages,
         "scraped": st.session_state.scraped,
         "summary": st.session_state.streamed_summary,
         "results_count": len(st.session_state.results),
