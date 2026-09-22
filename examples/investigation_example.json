@@ -1,0 +1,77 @@
+{
+  "timestamp": "2026-09-22T20:01:00",
+  "query": "synthetic security research",
+  "refined_query": "synthetic security research report",
+  "model": "ollama:example-model",
+  "preset": "Balanced",
+  "crawl": {
+    "max_depth": 1,
+    "max_pages": 5,
+    "scope": "same_host"
+  },
+  "sources": [
+    {
+      "link": "http://example.test/root",
+      "title": "Synthetic Root"
+    },
+    {
+      "link": "http://example.test/child",
+      "title": "Synthetic Child"
+    }
+  ],
+  "pages": [
+    {
+      "url": "http://example.test/root",
+      "parent_url": null,
+      "crawl_depth": 0,
+      "timestamp": "2026-09-22T20:00:00Z",
+      "title": "Synthetic Root",
+      "normalized_text": "Synthetic root page for Robin portability documentation.",
+      "entities": {
+        "onion_urls": [],
+        "emails": [
+          "analyst@example.test"
+        ],
+        "domains": [
+          "example.test"
+        ],
+        "ipv4": [
+          "192.0.2.10"
+        ],
+        "ipv6": [],
+        "md5": [],
+        "sha1": [],
+        "sha256": [],
+        "cves": [
+          "CVE-2099-99999"
+        ],
+        "handles": [
+          "@synthetic_analyst"
+        ]
+      }
+    },
+    {
+      "url": "http://example.test/child",
+      "parent_url": "http://example.test/root",
+      "crawl_depth": 1,
+      "timestamp": "2026-09-22T20:00:01Z",
+      "title": "Synthetic Child",
+      "normalized_text": "Synthetic child page. No real dark-web material is present.",
+      "entities": {
+        "onion_urls": [],
+        "emails": [],
+        "domains": [
+          "example.test"
+        ],
+        "ipv4": [],
+        "ipv6": [],
+        "md5": [],
+        "sha1": [],
+        "sha256": [],
+        "cves": [],
+        "handles": []
+      }
+    }
+  ],
+  "summary": "Synthetic example only. The investigation demonstrates the Robin V1 persistence and export schema without using live or dark-web data."
+}
