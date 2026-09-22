@@ -202,3 +202,86 @@ def scrape_multiple(urls_data, max_workers=5, max_return_chars=None):
 
     return results
     
+
+
+def fetch_page_for_crawl(url_data):
+    """
+    Fetch one page for the V1 limited crawler without changing the legacy
+    scrape_single()/scrape_multiple() code paths.
+
+    Returns a dict with url, title, content and raw href values, or None for an
+    invalid/non-HTTP(S) input URL. Onion hosts use the same Tor routing and
+    download limits as the legacy scraper.
+    """
+    url, title = _normalize_url_data(url_data)
+    if not url:
+        return None
+
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
+        return None
+
+    use_tor = parsed_url.hostname.lower().endswith(".onion")
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+    }
+    response = None
+
+    try:
+        session = _get_session(use_tor=use_tor)
+        if use_tor:
+            response = session.get(url, headers=headers, timeout=(10, 45), stream=True)
+        else:
+            response = session.get(url, headers=headers, timeout=(5, 25), stream=True)
+
+        if response.status_code != 200:
+            return {"url": url, "title": title, "content": title, "links": []}
+
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if content_type and not any(t in content_type for t in ALLOWED_CONTENT_TYPES):
+            return {"url": url, "title": title, "content": title, "links": []}
+
+        chunks = []
+        bytes_read = 0
+        for chunk in response.iter_content(chunk_size=8192):
+            if not chunk:
+                continue
+            bytes_read += len(chunk)
+            if bytes_read > MAX_DOWNLOAD_BYTES:
+                break
+            chunks.append(chunk)
+
+        html = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+        soup = BeautifulSoup(html, "html.parser")
+
+        page_title = title
+        if soup.title:
+            html_title = " ".join(soup.title.get_text(" ", strip=True).split())
+            if html_title:
+                page_title = html_title
+
+        links = []
+        for anchor in soup.find_all("a", href=True):
+            href = str(anchor.get("href") or "").strip()
+            if href:
+                links.append(href)
+
+        for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form"]):
+            tag.extract()
+        text = " ".join(soup.get_text(separator=" ").split())
+        text = text[:MAX_EXTRACTED_TEXT_CHARS]
+        content = f"{page_title} - {text}" if text else page_title
+
+        return {
+            "url": url,
+            "title": page_title,
+            "content": content,
+            "links": links,
+        }
+    except Exception as exc:
+        _logger.debug("Failed to fetch crawl page url=%s: %s", url, exc)
+        return {"url": url, "title": title, "content": title, "links": []}
+    finally:
+        if response is not None:
+            response.close()
