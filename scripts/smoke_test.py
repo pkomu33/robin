@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local, offline smoke test for Robin V1.1 limited recursive crawler."""
+"""Local, offline smoke test for Robin V1.2 crawler and entity extraction."""
 
 import os
 import sys
@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from crawler import crawl  # noqa: E402
+from entities import extract_entities  # noqa: E402
 
 
 class RecordingHandler(SimpleHTTPRequestHandler):
@@ -40,6 +41,16 @@ def _write_fixture(root, port):
 <a href="/child.html#duplicate">child duplicate</a>
 <a href="http://localhost:{port}/outside.html">outside host</a>
 <a href="mailto:test@example.com">mail</a>
+<p>Onion http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion/path?q=1.</p>
+<p>Email Analyst@Example.com and duplicate analyst@example.com.</p>
+<p>Domains example.org and alpha.example.net.</p>
+<p>IPv4 192.0.2.10 and invalid 999.999.999.999.</p>
+<p>IPv6 2001:db8::5.</p>
+<p>MD5 d41d8cd98f00b204e9800998ecf8427e.</p>
+<p>SHA1 da39a3ee5e6b4b0d3255bfef95601890afd80709.</p>
+<p>SHA256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.</p>
+<p>CVE cve-2024-12345 and duplicate CVE-2024-12345.</p>
+<p>Handle @researcher_01.</p>
 </body></html>""",
         encoding="utf-8",
     )
@@ -83,6 +94,29 @@ def main():
             assert depth0[0]["url"] == root_url
             assert depth0[0]["parent_url"] is None
             assert depth0[0]["crawl_depth"] == 0
+            assert depth0[0]["timestamp"].endswith("Z")
+            assert depth0[0]["normalized_text"] == depth0[0]["content"]
+
+            entities = depth0[0]["entities"]
+            assert entities["onion_urls"] == [
+                "http://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion/path?q=1"
+            ], entities
+            assert entities["emails"] == ["analyst@example.com"], entities
+            assert entities["domains"] == ["alpha.example.net", "example.com", "example.org"], entities
+            assert entities["ipv4"] == ["192.0.2.10"], entities
+            assert entities["ipv6"] == ["2001:db8::5"], entities
+            assert entities["md5"] == ["d41d8cd98f00b204e9800998ecf8427e"], entities
+            assert entities["sha1"] == ["da39a3ee5e6b4b0d3255bfef95601890afd80709"], entities
+            assert entities["sha256"] == [
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ], entities
+            assert entities["cves"] == ["CVE-2024-12345"], entities
+            assert entities["handles"] == ["@researcher_01"], entities
+
+            # Direct extractor check: exact duplicates are removed and ordering is stable.
+            direct = extract_entities("example.org example.com example.org CVE-2024-1234 cve-2024-1234")
+            assert direct["domains"] == ["example.com", "example.org"], direct
+            assert direct["cves"] == ["CVE-2024-1234"], direct
 
             RecordingHandler.requests_seen.clear()
             depth1 = crawl([root_url], max_depth=1, max_pages=10, same_host=True)
@@ -113,6 +147,9 @@ def main():
             print("PASS: same-host scope blocks localhost link")
             print("PASS: parent_url is correct")
             print("PASS: crawl_depth is correct")
+            print("PASS: page record includes timestamp, normalized_text and entities")
+            print("PASS: deterministic entity extraction covers onion/email/domain/IP/hash/CVE/handle")
+            print("PASS: entity results are deduplicated and stably ordered")
             print("PASS: smoke test used only local HTTP; Tor/Internet not required")
             return 0
         finally:

@@ -5,8 +5,10 @@ and does not replace the legacy scrape_single()/scrape_multiple() workflow.
 """
 
 from collections import deque
+from datetime import datetime, timezone
 from urllib.parse import urldefrag, urljoin, urlparse
 
+from entities import extract_entities
 from scrape import fetch_page_for_crawl
 
 
@@ -54,7 +56,8 @@ def crawl(urls_data, max_depth=0, max_pages=10, same_host=True):
 
     Returns:
         A list of page records. Each record includes url, parent_url,
-        crawl_depth, title and content.
+        crawl_depth, timestamp, title, normalized_text and entities. The legacy
+        content field is retained as an alias for compatibility with V1.1.
     """
     try:
         max_depth = int(max_depth)
@@ -94,13 +97,18 @@ def crawl(urls_data, max_depth=0, max_pages=10, same_host=True):
         if fetched is None:
             continue
 
+        normalized_text = fetched["content"]
         pages.append(
             {
                 "url": fetched["url"],
                 "parent_url": parent_url,
                 "crawl_depth": depth,
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "title": fetched["title"],
-                "content": fetched["content"],
+                "normalized_text": normalized_text,
+                "entities": extract_entities(normalized_text),
+                # V1.1 compatibility alias. New code should use normalized_text.
+                "content": normalized_text,
             }
         )
 
