@@ -1,10 +1,10 @@
 
-import base64
 import re
 import streamlit as st
 import model_registry
 from datetime import datetime
 from crawler import crawl
+from exporters import investigation_to_csv, investigation_to_json, investigation_to_markdown
 from investigation import build_investigation_record, load_investigations, save_investigation
 from scrape import scrape_multiple
 from search import get_search_results
@@ -73,13 +73,6 @@ def _render_no_results(headline: str, hints: list) -> None:
     st.stop()
 
 
-# V1.3 keeps the crawler policy fixed while persistence is introduced. UI
-# controls for these values belong to a later patch.
-V1_CRAWL_CONFIG = {
-    "max_depth": 1,
-    "max_pages": 20,
-    "scope": "same_host",
-}
 
 
 # Cache expensive backend calls
@@ -95,12 +88,12 @@ def cached_scrape_multiple(filtered: list, threads: int, content_chars: int):
 
 
 @st.cache_data(ttl=200, show_spinner=False)
-def cached_crawl_pages(filtered: list):
+def cached_crawl_pages(filtered: list, max_depth: int, max_pages: int, scope: str):
     return crawl(
         filtered,
-        max_depth=V1_CRAWL_CONFIG["max_depth"],
-        max_pages=V1_CRAWL_CONFIG["max_pages"],
-        same_host=V1_CRAWL_CONFIG["scope"] == "same_host",
+        max_depth=max_depth,
+        max_pages=max_pages,
+        same_host=scope == "same_host",
     )
 
 
@@ -248,6 +241,24 @@ max_scrape = st.sidebar.slider(
     "Max Pages to Scrape", 3, 20, 10, key="max_scrape_slider",
     help="Cap the number of filtered results that get scraped for content.",
 )
+crawl_depth = st.sidebar.slider(
+    "Crawl Depth", 0, 2, 1, key="crawl_depth_slider",
+    help="0 fetches only seed pages; higher values follow same-host links recursively.",
+)
+max_crawled_pages = st.sidebar.slider(
+    "Max Crawled Pages", 1, 50, 20, key="max_crawled_pages_slider",
+    help="Maximum number of unique pages attempted by the V1 crawler.",
+)
+st.sidebar.selectbox(
+    "Scope", ["Same host"], index=0, key="crawl_scope_select",
+    help="V1.5 intentionally limits recursive crawling to the seed host.",
+)
+crawl_config = {
+    "max_depth": crawl_depth,
+    "max_pages": max_crawled_pages,
+    "scope": "same_host",
+}
+st.sidebar.caption("Crawl Depth 0 is the mode closest to Robin V0 page acquisition.")
 content_chars = st.sidebar.slider(
     "Content per Page (characters)", 1000, 20000, 8000, step=1000,
     key="content_chars_slider",
@@ -395,6 +406,7 @@ if saved_investigations:
                 for page in _saved_pages
                 if page.get("url") and page.get("crawl_depth", 0) == 0
             }
+            _saved_record = {key: value for key, value in _saved.items() if key != "_filename"}
             st.session_state["active_investigation"] = {
                 "query": _saved.get("query", ""),
                 "refined": _saved.get("refined_query", ""),
@@ -408,6 +420,7 @@ if saved_investigations:
                 "summary": _saved.get("summary", ""),
                 "results_count": len(_saved.get("sources", [])),
                 "timestamp": _saved.get("timestamp", ""),
+                "record": _saved_record,
             }
             st.session_state["chat_history"] = []
             st.session_state["pivot_suggestions"] = []
@@ -446,6 +459,38 @@ findings_placeholder = st.empty()
 
 # --- Active investigation + follow-up chat helpers (v2.8) ---
 
+def _render_export_buttons(record, key_prefix):
+    """Render JSON, CSV and Markdown downloads for an investigation record."""
+    if not isinstance(record, dict):
+        return
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    cols = st.columns(3)
+    cols[0].download_button(
+        "📥 JSON",
+        data=investigation_to_json(record),
+        file_name=f"investigation_{stamp}.json",
+        mime="application/json",
+        key=f"{key_prefix}_json",
+        use_container_width=True,
+    )
+    cols[1].download_button(
+        "📥 CSV",
+        data=investigation_to_csv(record),
+        file_name=f"investigation_{stamp}.csv",
+        mime="text/csv",
+        key=f"{key_prefix}_csv",
+        use_container_width=True,
+    )
+    cols[2].download_button(
+        "📥 Markdown",
+        data=investigation_to_markdown(record),
+        file_name=f"investigation_{stamp}.md",
+        mime="text/markdown",
+        key=f"{key_prefix}_markdown",
+        use_container_width=True,
+    )
+
+
 def _render_investigation_body(inv):
     """Render Notes / Sources / Findings / Download for a stored investigation."""
     with st.expander("📋 Notes", expanded=False):
@@ -465,14 +510,7 @@ def _render_investigation_body(inv):
     st.subheader(":red[🔎 Findings]", anchor=None, divider="gray")
     summary = inv.get("summary", "") or ""
     st.markdown(summary)
-    if summary:
-        now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        b64 = base64.b64encode(summary.encode()).decode()
-        href = (
-            f'<div class="aStyle">📥 <a href="data:file/markdown;base64,{b64}" '
-            f'download="summary_{now}.md">Download</a></div>'
-        )
-        st.markdown(href, unsafe_allow_html=True)
+    _render_export_buttons(inv.get("record"), "active_export")
 
 
 def _followup_history_messages(chat_history, max_turns=5):
@@ -654,7 +692,12 @@ if _do_run:
                 st.session_state.scraped = cached_scrape_multiple(
                     st.session_state.filtered, threads, content_chars
                 )
-                st.session_state.pages = cached_crawl_pages(st.session_state.filtered)
+                st.session_state.pages = cached_crawl_pages(
+                    st.session_state.filtered,
+                    crawl_depth,
+                    max_crawled_pages,
+                    crawl_config["scope"],
+                )
             except Exception as e:
                 _render_pipeline_error("scrape and crawl the selected pages", e)
 
@@ -697,7 +740,7 @@ if _do_run:
         model=model,
         preset_label=selected_preset_label,
         sources=st.session_state.filtered,
-        crawl=V1_CRAWL_CONFIG,
+        crawl=crawl_config,
         pages=st.session_state.pages,
         summary=st.session_state.streamed_summary,
     )
@@ -724,11 +767,7 @@ if _do_run:
     with findings_placeholder.container():
         st.subheader(":red[🔎 Findings]", anchor=None, divider="gray")
         st.markdown(st.session_state.streamed_summary)
-        now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        fname = f"summary_{now}.md"
-        b64 = base64.b64encode(st.session_state.streamed_summary.encode()).decode()
-        href = f'<div class="aStyle">📥 <a href="data:file/markdown;base64,{b64}" download="{fname}">Download</a></div>'
-        st.markdown(href, unsafe_allow_html=True)
+        _render_export_buttons(_investigation_record, "run_export")
 
     status_slot.success(f"✔️ Pipeline completed successfully! Investigation saved as `{_fname}`")
 
@@ -740,13 +779,14 @@ if _do_run:
         "preset": selected_preset,
         "preset_label": selected_preset_label,
         "sources": st.session_state.filtered,
-        "crawl": dict(V1_CRAWL_CONFIG),
+        "crawl": dict(crawl_config),
         "pages": st.session_state.pages,
         "scraped": st.session_state.scraped,
         "summary": st.session_state.streamed_summary,
         "results_count": len(st.session_state.results),
         "content_chars": content_chars,
         "max_scrape": max_scrape,
+        "record": _investigation_record,
     }
     st.session_state["chat_history"] = []
 
